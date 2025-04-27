@@ -82,26 +82,6 @@ public:
 };
 
 
-class nixlUcxMoRequestH : public nixlBackendReqH {
-private:
-    typedef std::pair<nixlBackendEngine *,nixlBackendReqH *> req_pair_t;
-    typedef std::vector<req_pair_t> req_list_t;
-    typedef req_list_t::iterator req_list_it_t;
-
-    req_list_t reqs;
-
-    std::string remoteAgent;
-    bool notifNeed;
-    std::string notifMsg;
-public:
-    nixlUcxMoRequestH()
-    {
-        notifNeed = false;
-    }
-
-    friend class nixlUcxMoEngine;
-
-};
 
 class nixlUcxMoEngine : public nixlBackendEngine {
 private:
@@ -109,7 +89,7 @@ private:
     uint32_t _gpuCnt;
     int setEngCnt(uint32_t host_engines);
     uint32_t getEngCnt();
-    int32_t getEngIdx(nixl_mem_t type, uint32_t devId);
+    int32_t getEngIdx(nixl_mem_t type, uint64_t devId);
     std::string getEngName(const std::string &baseName, uint32_t eidx);
     std::string getEngBase(const std::string &engName);
     bool pthrOn;
@@ -121,36 +101,19 @@ private:
     typedef remote_conn_map_t::iterator remote_comm_it_t;
     remote_conn_map_t remoteConnMap;
 
-    class nixlUcxMoBckndReq : public nixlBackendReqH {
-        private:
-            int engIdx;
-            nixlBackendReqH *req;
-        public:
-
-            nixlUcxMoBckndReq() : nixlBackendReqH() {
-            }
-
-            ~nixlUcxMoBckndReq() {
-            }
-    };
-
     // Memory helper
     nixl_status_t internalMDHelper (const nixl_blob_t &blob,
                                     const nixl_mem_t &nixl_mem,
                                     const std::string &agent,
                                     nixlBackendMD* &output);
 
-    // Data transfer
-    nixl_status_t retHelper(nixl_status_t ret, nixlBackendEngine *eng,
-                            nixlUcxMoRequestH *req, nixlBackendReqH *&int_req);
-    void cancelRequests(nixlUcxMoRequestH *req);
 public:
     nixlUcxMoEngine(const nixlBackendInitParams* init_params);
     ~nixlUcxMoEngine();
 
     bool supportsRemote () const { return true; }
-    bool supportsLocal () const { return true; }
-    bool supportsNotif () const { return true; }
+    bool supportsLocal  () const { return false; }
+    bool supportsNotif  () const { return true; }
     bool supportsProgTh () const { return pthrOn; }
 
     nixl_mem_list_t getSupportedMems () const;

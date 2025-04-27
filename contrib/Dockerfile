@@ -13,138 +13,71 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/pytorch:25.02-py3
-ARG MOFED_VERSION=24.10-1.1.4.0
+ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+ARG BASE_IMAGE_TAG="25.03-cuda12.8-devel-ubuntu24.04"
 
-ENV TZ=America
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
-ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_1/
-ARG NSYS_PKG=NsightSystems-linux-cli-public-2025.1.1.131-3554042.deb
+ARG DEFAULT_PYTHON_VERSION="3.12"
 
-RUN apt-get update -y && apt-get -y install curl \
-                                            git \
-                                            libnuma-dev \
-                                            numactl \
-                                            wget \
-                                            autotools-dev \
-                                            automake \
-                                            libtool \
-                                            libz-dev \
-                                            libiberty-dev \
-                                            flex \
-                                            build-essential \
-                                            cmake \
-                                            libibverbs-dev \
-                                            libgoogle-glog-dev \
-                                            libgtest-dev \
-                                            libjsoncpp-dev \
-                                            libpython3-dev \
-                                            libboost-all-dev \
-                                            libssl-dev \
-                                            libgrpc-dev \
-                                            libgrpc++-dev \
-                                            libprotobuf-dev \
-                                            protobuf-compiler-grpc \
-                                            pybind11-dev \
-                                            python3-full \
-                                            python3-pip \
-                                            python3-numpy \
-                                            etcd-server \
-                                            net-tools \
-                                            pciutils \
-                                            libpci-dev \
-                                            vim \
-                                            tmux \
-                                            screen \
-                                            ibverbs-utils \
-                                            libibmad-dev
+RUN apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get -y install \
+    ninja-build \
+    pybind11-dev \
+    libclang-dev \
+    cmake
 
-RUN apt-get install -y linux-tools-common linux-tools-generic ethtool iproute2
-RUN apt-get install -y dkms linux-headers-generic
-RUN apt-get install -y meson ninja-build uuid-dev gdb
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-RUN apt-get update && apt install -y wget libglib2.0-0
-RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.86.0 \
+    RUSTARCH=x86_64-unknown-linux-gnu
 
-RUN cd /usr/local/src && \
-    curl -fSsL "https://content.mellanox.com/ofed/MLNX_OFED-${MOFED_VERSION}/MLNX_OFED_LINUX-${MOFED_VERSION}-ubuntu24.04-x86_64.tgz" -o mofed.tgz && \
-    tar -xf /usr/local/src/mofed.tgz && \
-    cd MLNX_OFED_LINUX-* && \
-    apt-get update && apt-get install -y --no-install-recommends \
-        ./DEBS/libibverbs* ./DEBS/ibverbs-providers* ./DEBS/librdmacm* ./DEBS/libibumad* && \
-    rm -rf /var/lib/apt/lists/* /usr/local/src/*
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/cuda/lib64 \
-    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs
+WORKDIR /workspace/nixl
 
-ENV LIBRARY_PATH=$LIBRARY_PATH:/usr/local/lib \
-    LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+# LD_LIBRARY_PATH is needed for auditwheel to find libcuda.so.1
+# Set incorrectly to `compat/lib` in cuda-dl-base image
+ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
 
-WORKDIR /workspace
-RUN git clone https://github.com/NVIDIA/gdrcopy.git
-RUN PREFIX=/usr/local DESTLIB=/usr/local/lib make -C /workspace/gdrcopy lib_install
-RUN cp gdrcopy/src/libgdrapi.so.2.* /usr/lib/x86_64-linux-gnu/
-RUN ldconfig
+ENV VIRTUAL_ENV=/workspace/nixl/.venv
+RUN uv venv $VIRTUAL_ENV --python $DEFAULT_PYTHON_VERSION && \
+    # pybind11 pip install needed for ubuntu 22.04
+    uv pip install --upgrade meson pybind11 patchelf
 
-ARG OPENMPI_VERSION=5.0.6
-ARG UCX_VERSION=v1.18.0
-
-RUN cd /usr/local/src && \
-    curl -fSsL "https://github.com/openucx/ucx/tarball/${UCX_VERSION}" | tar xz && \
-    cd openucx-ucx* && \
-    ./autogen.sh && ./configure     \
-        --enable-shared             \
-        --disable-static            \
-        --disable-doxygen-doc       \
-        --enable-optimizations      \
-        --enable-cma                \
-        --enable-devel-headers      \
-        --with-cuda=/usr/local/cuda \
-        --with-verbs                \
-        --with-dm                   \
-        --with-gdrcopy=/usr/local   \
-        --enable-mt &&              \
-    make -j &&                      \
-    make -j install-strip &&        \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
-ENV CPATH=/usr/include:$CPATH
-ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
-SHELL ["/bin/bash", "-c"]
-
-RUN cd /usr/local/src && \
-    curl -fSsL "https://www.open-mpi.org/software/ompi/v${OPENMPI_VERSION:0:3}/downloads/openmpi-${OPENMPI_VERSION}.tar.gz" | tar xz && \
-    cd openmpi-${OPENMPI_VERSION} && \
-    ./configure                          \
-        --prefix=/usr/local/ompi         \
-        --with-cuda=/usr/local/cuda      \
-        --enable-mpi1-compatibility --with-slurm --without-ofi --with-libevent=internal --with-pmix=internal --with-prrte=internal --enable-hwloc=internal && \
-    make -j &&                           \
-    make -j install-strip &&             \
-    ldconfig
-
-WORKDIR /workspace
-
-ENV LD_LIBRARY_PATH=/usr/local/ompi/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
-ENV CPATH=/usr/local/ompi/include:$CPATH
-ENV PATH=/usr/local/ompi/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/local/ompi/lib/pkgconfig:$PKG_CONFIG_PATH
-
-# Disabling CUDA IPC not to use NVLINK, as it slows down local
-# UCX transfers and can cause contention with local collectives.
-ENV UCX_TLS=^cuda_ipc
-
-# Make sure to build the container from the cloned git repository
-RUN mkdir nixl
 COPY . /workspace/nixl
-RUN cd nixl && git clean -d -f && rm -rf .git build
-RUN cd nixl && mkdir build && meson setup build/ --prefix=/usr/local/nixl && cd build/ && ninja && ninja install
 
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf
-RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf
-RUN ldconfig
+RUN rm -rf build && \
+    mkdir build && \
+    uv run meson setup build/ --prefix=/usr/local/nixl && \
+    cd build && \
+    ninja && \
+    ninja install
 
-RUN cd nixl && pip3 install --break-system-packages .
+ENV NIXL_PREFIX=/usr/local/nixl
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/x86_64-linux-gnu/plugins
+RUN echo "/usr/local/nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "/usr/local/nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig
+
+RUN cd src/bindings/rust && cargo build --release --locked
+
+# Create the wheel
+ARG WHL_PYTHON_VERSIONS="3.12"
+ARG WHL_PLATFORM="manylinux_2_39_x86_64"
+RUN IFS=',' read -ra PYTHON_VERSIONS <<< "$WHL_PYTHON_VERSIONS" && \
+    for PYTHON_VERSION in "${PYTHON_VERSIONS[@]}"; do \
+        uv build --wheel --out-dir /tmp/dist --python $PYTHON_VERSION; \
+    done
+RUN uv pip install auditwheel && \
+    uv run auditwheel repair /tmp/dist/nixl-*cp31*.whl --plat $WHL_PLATFORM --wheel-dir /workspace/nixl/dist
+
+RUN uv pip install dist/nixl-*cp${DEFAULT_PYTHON_VERSION//./}*.whl

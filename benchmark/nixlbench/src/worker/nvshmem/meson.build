@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -15,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nixl._api import nixl_agent
+if nvshmem_available
+  nvshmem_worker_sources = [
+    'nvshmem_worker.cpp',
+    'nvshmem_worker.h',
+  ]
 
-if __name__ == "__main__":
-    nixl_agent1 = nixl_agent("bad agent", None)
-
-    try:
-        # oops, I can't spell
-        nixl_agent1.create_backend("UVX")
-    except Exception as e:
-        print("Caught you!")
-        print(e)
+nvshmem_worker_lib = static_library('nvshmemWorker',
+  nvshmem_worker_sources,
+  include_directories: inc_dir,
+  dependencies: [cuda_dep, nvshmem_lib],
+  install: true,
+)
+endif

@@ -39,13 +39,27 @@ NVIDIA Inference Xfer Library (NIXL) is targeted for accelerating point to point
 
 NIXL was tested with UCX version 1.18.0.
 
+[GDRCopy](https://github.com/NVIDIA/gdrcopy) is available on Github and is necessary for maximum performance, but UCX and NIXL will work without it.
+
 ```
 $ wget https://github.com/openucx/ucx/releases/download/v1.18.0/ucx-1.18.0.tar.gz
 $ tar xzf ucx-1.18.0.tar.gz
 $ cd ucx-1.18.0
-$ ./contrib/configure-release --prefix=<PATH_TO_INSTALL>/install
-$ make -j8
-$ make install
+$ ./configure                          \
+    --enable-shared                    \
+    --disable-static                   \
+    --disable-doxygen-doc              \
+    --enable-optimizations             \
+    --enable-cma                       \
+    --enable-devel-headers             \
+    --with-cuda=<cuda install>         \
+    --with-verbs                       \
+    --with-dm                          \
+    --with-gdrcopy=<gdrcopy install>   \
+    --enable-mt
+$ make -j
+$ make -j install-strip
+$ ldconfig
 ```
 
 ## Getting started
@@ -55,7 +69,45 @@ $ make install
 $ meson setup <name_of_build_dir>
 $ cd <name_of_build_dir>
 $ ninja
-$ ninja-install
+$ ninja install
+```
+
+### Build Options
+
+NIXL supports several build options that can be specified during the meson setup phase:
+
+```bash
+# Basic build setup with default options
+$ meson setup <name_of_build_dir>
+
+# Setup with custom options (example)
+$ meson setup <name_of_build_dir> \
+    -Dbuild_docs=true \           # Build Doxygen documentation
+    -Ducx_path=/path/to/ucx \     # Custom UCX installation path
+    -Dinstall_headers=true \      # Install development headers
+    -Ddisable_gds_backend=false   # Enable GDS backend
+```
+
+Common build options:
+- `build_docs`: Build Doxygen documentation (default: false)
+- `ucx_path`: Path to UCX installation (default: system path)
+- `install_headers`: Install development headers (default: true)
+- `disable_gds_backend`: Disable GDS backend (default: false)
+- `cudapath_inc`, `cudapath_lib`: Custom CUDA paths
+- `static_plugins`: Comma-separated list of plugins to build statically
+
+### Building Documentation
+
+If you have Doxygen installed, you can build the documentation:
+
+```bash
+# Configure with documentation enabled
+$ meson setup <name_of_build_dir> -Dbuild_docs=true
+$ cd <name_of_build_dir>
+$ ninja
+
+# Documentation will be generated in <name_of_build_dir>/html
+# After installation (ninja install), documentation will be available in <prefix>/share/doc/nixl/
 ```
 
 ### pybind11 Python Interface
@@ -63,19 +115,58 @@ The pybind11 bindings for the public facing NIXL API are available in src/bindin
 
 The preferred way is to build it through meson-python, which will just let it be installed with pip. This can be done from the root nixl directory:
 
-` $pip install .`
+` $ pip install .`
+
+### Rust Bindings
+```bash
+# Build with default NIXL installation (/opt/nvidia/nvda_nixl)
+$ cd src/bindings/rust
+$ cargo build --release
+
+# Or specify custom NIXL location
+$ NIXL_PREFIX=/path/to/nixl cargo build --release
+
+# Run tests
+$ cargo test
+```
+
+Use in your project by adding to `Cargo.toml`:
+```toml
+[dependencies]
+nixl-sys = { path = "path/to/nixl/bindings/rust" }
+```
+
+### Other build options
+See [contrib/README.md](contrib/README.md) for more build options.
 
 ### Building Docker container
 To build the docker container, first clone the current repository. Also make sure you are able to pull docker images to your machine before attempting to build the container.
 
 Run the following from the root folder of the cloned NIXL repository:
-
 ```
-$ docker build -t nixl-container -f contrib/Dockerfile .
+$ ./contrib/build-container.sh
+```
+
+By default, the container is built with Ubuntu 24.04. To build a container for Ubuntu 22.04 use the --os option as follows:
+```
+$ ./contrib/build-container.sh --os ubuntu22
+```
+
+To see all the options supported by the container use:
+```
+$ ./contrib/build-container.sh -h
+```
+
+The container also includes a prebuilt python wheel in /workspace/dist if required for installing/distributing. Also, the wheel can be built with a separate script (see below).
+
+### Building the python wheel
+The contrib folder also includes a script to build the python wheel with the UCX dependencies. Note, that UCX and other NIXL dependencies are required to be installed.
+```
+$ ./contrib/build-wheel.sh
 ```
 
 ## Examples
 
-* [C++ examples](https://github.com/ai-dynamo/nixl/tree/main/test/nixl)
+* [C++ examples](https://github.com/ai-dynamo/nixl/tree/main/examples/cpp)
 
-* [Python examples](https://github.com/ai-dynamo/nixl/tree/main/test/python)
+* [Python examples](https://github.com/ai-dynamo/nixl/tree/main/examples/python)

@@ -40,6 +40,72 @@ static void checkCudaError(cudaError_t result, const char *message) {
 #endif
 
 
+class testHndlIterator {
+private:
+    bool reuse;
+    bool set;
+    bool prepare;
+    bool release;
+    nixlBackendReqH* handle;
+public:
+    testHndlIterator(bool _reuse) {
+        reuse = _reuse;
+        if (reuse) {
+            prepare = true;
+            release = false;
+        } else {
+            prepare = true;
+            release = true;
+        }
+        handle = nullptr;
+        set = false;
+    }
+
+    ~testHndlIterator() {
+        /* Make sure that handler was released */
+        assert(!set);
+    }
+
+    bool needPrep() {
+        if (reuse) {
+            if (!prepare) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool needRelease() {
+        return release;
+    }
+
+    void isLast() {
+        if (reuse) {
+            release = true;
+        }
+    }
+
+    void setHandle(nixlBackendReqH *_handle)
+    {
+        assert(!set);
+        handle = _handle;
+        set = true;
+        if (reuse) {
+            prepare = false;
+        }
+    }
+
+    void unsetHandle() {
+        assert(set);
+        set = false;
+    }
+
+    nixlBackendReqH *&getHandle() {
+        assert(set);
+        return handle;
+    }
+};
+
 
 nixlBackendEngine *createEngine(std::string name, bool p_thread)
 {
@@ -217,6 +283,24 @@ void *releaseValidationPtr(nixl_mem_t mem_type, void *addr)
     return NULL;
 }
 
+void allocateWrongGPUTest(nixlBackendEngine* ucx, int dev_id)
+{
+    nixlBlobDesc desc;
+    nixlBackendMD* md;
+    void* buf;
+
+    allocateBuffer(VRAM_SEG, dev_id, desc.len, buf);
+
+    desc.devId = dev_id;
+    desc.addr = (uint64_t) buf;
+
+    int ret = ucx->registerMem(desc, VRAM_SEG, md);
+
+    assert(ret == NIXL_ERR_NOT_SUPPORTED);
+
+    releaseBuffer(VRAM_SEG, dev_id, buf);
+}
+
 void allocateAndRegister(nixlBackendEngine *ucx, int dev_id, nixl_mem_t mem_type,
                          void* &addr, size_t len, nixlBackendMD* &md)
 {
@@ -284,16 +368,16 @@ static string op2string(nixl_xfer_op_t op, bool hasNotif)
 }
 
 
-
 void performTransfer(nixlBackendEngine *ucx1, nixlBackendEngine *ucx2,
                      nixl_meta_dlist_t &req_src_descs,
                      nixl_meta_dlist_t &req_dst_descs,
                      void* addr1, void* addr2, size_t len,
-                     nixl_xfer_op_t op, bool progress, bool use_notif)
+                     nixl_xfer_op_t op,
+                     testHndlIterator &hiter,
+                     bool progress, bool use_notif)
 {
     int ret2;
     nixl_status_t ret3;
-    nixlBackendReqH* handle;
     void *chkptr1, *chkptr2;
 
     std::string remote_agent ("Agent2");
@@ -311,6 +395,13 @@ void performTransfer(nixlBackendEngine *ucx1, nixlBackendEngine *ucx2,
     // Posting a request, to be updated to return an async handler,
     // or an ID that later can be used to check the status as a new method
     // Also maybe we would remove the WRITE and let the backend class decide the op
+    if (hiter.needPrep()) {
+        nixlBackendReqH *new_handle = nullptr;
+        ret3 = ucx1->prepXfer(op, req_src_descs, req_dst_descs, remote_agent, new_handle, &opt_args);
+        assert(ret3 == NIXL_SUCCESS);
+        hiter.setHandle(new_handle);
+    }
+    nixlBackendReqH *&handle = hiter.getHandle();
     ret3 = ucx1->postXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
     assert( ret3 == NIXL_SUCCESS || ret3 == NIXL_IN_PROG);
 
@@ -327,9 +418,12 @@ void performTransfer(nixlBackendEngine *ucx1, nixlBackendEngine *ucx2,
             }
             assert( ret3 == NIXL_SUCCESS || ret3 == NIXL_IN_PROG);
         }
-        ucx1->releaseReqH(handle);
     }
 
+    if (hiter.needRelease()) {
+        hiter.unsetHandle();
+        ucx1->releaseReqH(handle);
+    }
 
     if(use_notif) {
             /* Test notification path */
@@ -376,8 +470,9 @@ void test_intra_agent_transfer(bool p_thread, nixlBackendEngine *ucx, nixl_mem_t
 
     std::cout << std::endl << std::endl;
     std::cout << "****************************************************" << std::endl;
-    std::cout << "   Intra-agent memory transfer test: " <<
-            "P-Thr=" << (p_thread ? "ON" : "OFF") << ", " << memType2Str(mem_type) << std::endl;
+    std::cout << "   Intra-agent memory transfer test: "
+              << "P-Thr=" << (p_thread ? "ON" : "OFF") << ", " << memType2Str(mem_type)
+              << std::endl;
     std::cout << "****************************************************" << std::endl;
     std::cout << std::endl << std::endl;
 
@@ -432,8 +527,9 @@ void test_intra_agent_transfer(bool p_thread, nixlBackendEngine *ucx, nixl_mem_t
                 doMemset(mem_type, 0, addr2, 0, len);
 
                 /* Test */
+                testHndlIterator hiter(false);
                 performTransfer(ucx, ucx, req_src_descs, req_dst_descs,
-                                addr1, addr2, len, ops[i], p_thread, use_notif);
+                                addr1, addr2, len, ops[i], hiter, p_thread, use_notif);
             }
         }
     }
@@ -445,7 +541,7 @@ void test_intra_agent_transfer(bool p_thread, nixlBackendEngine *ucx, nixl_mem_t
     ucx->disconnect(agent1);
 }
 
-void test_inter_agent_transfer(bool p_thread,
+void test_inter_agent_transfer(bool p_thread, bool reuse_hndl,
                                 nixlBackendEngine *ucx1, nixl_mem_t src_mem_type, int src_dev_id,
                                 nixlBackendEngine *ucx2, nixl_mem_t dst_mem_type, int dst_dev_id)
 {
@@ -454,8 +550,9 @@ void test_inter_agent_transfer(bool p_thread,
 
     std::cout << std::endl << std::endl;
     std::cout << "****************************************************" << std::endl;
-    std::cout << "    Inter-agent memory transfer test P-Thr=" <<
-                        (p_thread ? "ON" : "OFF") << std::endl;
+    std::cout << "    Inter-agent memory transfer test " << std::endl;
+    std::cout << "         P-Thr=" << (p_thread ? "ON" : "OFF") << std::endl;
+    std::cout << "         Handler-reuse=" << (reuse_hndl ? "ON" : "OFF") << std::endl;
     std::cout << "         (" << memType2Str(src_mem_type) << " -> "
                 << memType2Str(dst_mem_type) << ")" << std::endl;
     std::cout << "****************************************************" << std::endl;
@@ -511,14 +608,19 @@ void test_inter_agent_transfer(bool p_thread,
 
         for(bool use_notif : use_notifs) {
             cout << endl << op2string(ops[i], use_notif) << " test (" << iter << ") iterations" <<endl;
+            testHndlIterator hiter(reuse_hndl);
             for(int k = 0; k < iter; k++ ) {
                 /* Init data */
                 doMemset(src_mem_type, src_dev_id, addr1, 0xbb, len);
                 doMemset(dst_mem_type, dst_dev_id, addr2, 0xda, len);
 
                 /* Test */
+                if ((k+1) == iter) {
+                    /* If this is the last iteration */
+                    hiter.isLast();
+                }
                 performTransfer(ucx1, ucx2, req_src_descs, req_dst_descs,
-                                addr1, addr2, len, ops[i], !p_thread, use_notif);
+                                addr1, addr2, len, ops[i], hiter, !p_thread, use_notif);
             }
         }
     }
@@ -606,25 +708,40 @@ int main()
     }
 
     for(int i = 0; i < 2; i++) {
-        test_inter_agent_transfer(thread_on[i],
-                                ucx[i][0], DRAM_SEG, 0,
-                                ucx[i][1], DRAM_SEG, 0);
+        test_inter_agent_transfer(thread_on[i], false,
+                                  ucx[i][0], DRAM_SEG, 0,
+                                  ucx[i][1], DRAM_SEG, 0);
+        test_inter_agent_transfer(thread_on[i], true,
+                                  ucx[i][0], DRAM_SEG, 0,
+                                  ucx[i][1], DRAM_SEG, 0);
+
 #ifdef HAVE_CUDA
         if (n_vram_dev > 1) {
-            test_inter_agent_transfer(thread_on[i],
-                                    ucx[i][0], VRAM_SEG, dev_ids[0],
-                                    ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i],
-                                    ucx[i][0], DRAM_SEG, 0,
-                                    ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i],
-                                    ucx[i][0], VRAM_SEG, 0,
-                                    ucx[i][1], DRAM_SEG, dev_ids[1]);
+            test_inter_agent_transfer(thread_on[i], false,
+                                      ucx[i][0], VRAM_SEG, dev_ids[0],
+                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
+            test_inter_agent_transfer(thread_on[i], true,
+                                      ucx[i][0], VRAM_SEG, dev_ids[0],
+                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
+            test_inter_agent_transfer(thread_on[i], true,
+                                      ucx[i][0], DRAM_SEG, dev_ids[0],
+                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
+            test_inter_agent_transfer(thread_on[i], true,
+                                      ucx[i][0], VRAM_SEG, dev_ids[0],
+                                      ucx[i][1], DRAM_SEG, dev_ids[1]);
         }
 #endif
     }
 
-    // Allocate UCX engines
+#ifdef HAVE_CUDA
+    if (n_vram_dev > 1) {
+		//Test if registering on a different GPU fails correctly
+		allocateWrongGPUTest(ucx[0][0], 1);
+		std::cout << "Verified registration on wrong GPU fails correctly\n";
+	}
+#endif
+
+    // Deallocate UCX engines
     for(int i = 0; i < 2; i++) {
         for(int j = 0; j < 2; j++) {
             releaseEngine(ucx[i][j]);

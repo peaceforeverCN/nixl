@@ -21,34 +21,79 @@
 #include <cstdint>
 #include "nixl_types.h"
 
-// Per Agent configuration information, such as if progress thread should be used.
-// Other configs such as assigned IP/port or device access can be added.
+/**
+ * @class nixlAgentConfig
+ * @brief Per Agent configuration information, such as if progress thread should be used.
+ *        Other configs such as assigned IP/port or device access can be added.
+ */
 class nixlAgentConfig {
     private:
 
-        // Enable progress thread
+        /** @var Enable progress thread */
         bool     useProgThread;
+        /** @var Enable listener thread */
+        bool     useListenThread;
+        /** @var Port for listener thread to use */
+        int      listenPort;
+        /** @var synchronization mode for multi-threaded environment execution */
+        nixl_thread_sync_t syncMode;
+
 
     public:
 
-        /*
-         * Progress thread frequency knob (in us)
-         * The progress thread is calling sched_yield to avoid blocking a core
-         * If pthrDelay time is less than sched_yield time - option has no effect
-         * Otherwise pthread will be calling sched_yield until the specified
-         * amount of time has past.
+        /**
+         * @var Progress thread frequency knob (in us)
+         *      The progress thread is calling sched_yield to avoid blocking a core
+         *      If pthrDelay time is less than sched_yield time - option has no effect
+         *      Otherwise pthread will be calling sched_yield until the specified
+         *      amount of time has past.
          */
         uint64_t pthrDelay;
+        /**
+         * @var Listener thread frequency knob (in us)
+         *      Listener thread sleeps in a similar way to progress thread, desrcibed previously.
+         *      These will be combined into a unified NIXL Thread API in a future version.
+         */
+        uint64_t lthrDelay;
 
-        // Important configs such as useProgThread must be given and can't be changed.
-        nixlAgentConfig(const bool use_prog_thread, const uint64_t pthr_delay_us=0) {
-            this->useProgThread = use_prog_thread;
-            this->pthrDelay     = pthr_delay_us;
-        }
-        nixlAgentConfig(const nixlAgentConfig &cfg) = default;
-        ~nixlAgentConfig() = default;
+
+
+        /**
+         * @brief  Agent configuration constructor for enabling various features.
+         * @param use_prog_thread    flag to determine use of progress thread
+         * @param use_listen_thread  flag to determine use of listener thread
+         * @param port               specify port for listener thread to listen on
+         * @param pthr_delay_us      Optional delay for pthread in us
+         * @param pthr_delay_us      Optional delay for listener thread in us
+         * @param sync_mode          Thread synchronization mode
+         */
+        nixlAgentConfig (const bool use_prog_thread,
+                         const bool use_listen_thread=false,
+                         const int port=0,
+                         const uint64_t pthr_delay_us=0,
+                         const uint64_t lthr_delay_us = 100000,
+                         nixl_thread_sync_t sync_mode=nixl_thread_sync_t::NIXL_THREAD_SYNC_DEFAULT) :
+                         useProgThread(use_prog_thread),
+                         useListenThread(use_listen_thread),
+                         listenPort(port),
+                         syncMode(sync_mode),
+                         pthrDelay(pthr_delay_us),
+                         lthrDelay(lthr_delay_us) { }
+
+        /**
+         * @brief Copy constructor for nixlAgentConfig object
+         *
+         * @param cfg  nixlAgentConfig object
+         */
+        nixlAgentConfig (const nixlAgentConfig &cfg) = default;
+
+        /**
+         * @brief Default destructor for nixlAgentConfig
+         */
+        ~nixlAgentConfig () = default;
 
     friend class nixlAgent;
+    friend class nixlAgentData;
 };
 
 #endif

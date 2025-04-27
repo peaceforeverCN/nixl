@@ -24,61 +24,83 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <list>
+#include <vector>
 #include "gds_utils.h"
 #include "backend/backend_engine.h"
 
 class nixlGdsMetadata : public nixlBackendMD {
     public:
-        gdsFileHandle  handle;
-        gdsMemBuf      buf;
-        nixl_mem_t     type;
+        gdsFileHandle handle;
+        gdsMemBuf buf;
+        nixl_mem_t type;
 
         nixlGdsMetadata() : nixlBackendMD(true) { }
         ~nixlGdsMetadata() { }
 };
 
-
-class nixlGdsIOBatch  {
-    private:
-        unsigned int        max_reqs;
-
-        CUfileBatchHandle_t batch_handle;
-        CUfileIOEvents_t    *io_batch_events;
-        CUfileIOParams_t    *io_batch_params;
-        CUfileError_t       init_err;
-        nixl_status_t       current_status;
-        unsigned int        entries_completed;
-        unsigned int        batch_size;
-
+class GdsTransferRequestH {
     public:
-        nixlGdsIOBatch(unsigned int size);
-        ~nixlGdsIOBatch();
+        void*           addr;
+        size_t          size;
+        size_t          file_offset;
+        CUfileHandle_t  fh;
+        CUfileOpcode_t  op;
 
-        nixl_status_t       addToBatch(CUfileHandle_t fh,  void *buffer,
-                                       size_t size, size_t file_offset,
-                                       size_t ptr_offset, CUfileOpcode_t type);
-        nixl_status_t       submitBatch(int flags);
-        nixl_status_t       checkStatus();
-        nixl_status_t       cancelBatch();
-        void                destroyBatch();
+        // Default constructor
+        GdsTransferRequestH() {
+            addr = nullptr;
+            size = 0;
+            file_offset = 0;
+            fh = nullptr;
+            op = CUFILE_READ;
+        }
+
+        // Constructor with parameters
+        GdsTransferRequestH(void* a, size_t s, size_t offset,
+			    CUfileHandle_t handle, CUfileOpcode_t operation) {
+            addr = a;
+            size = s;
+            file_offset = offset;
+            fh = handle;
+            op = operation;
+        }
 };
 
 class nixlGdsBackendReqH : public nixlBackendReqH {
     public:
-       std::list<nixlGdsIOBatch *> batch_io_list;
+        std::vector<GdsTransferRequestH> request_list;
+        std::vector<nixlGdsIOBatch*> batch_io_list;
+        bool needs_prep;
 
-       nixlGdsBackendReqH() {}
-       ~nixlGdsBackendReqH() {
-       for (auto obj : batch_io_list)
-           delete obj;
-       }
+        nixlGdsBackendReqH() {
+            needs_prep = true;
+        }
+        ~nixlGdsBackendReqH() {
+            for (auto* batch : batch_io_list) {
+                delete batch;
+            }
+            batch_io_list.clear();
+        }
 };
-
 
 class nixlGdsEngine : public nixlBackendEngine {
     private:
-        gdsUtil                      *gds_utils;
+        gdsUtil *gds_utils;
         std::unordered_map<int, gdsFileHandle> gds_file_map;
+        std::list<nixlGdsIOBatch*> batch_pool;
+        unsigned int batch_pool_size;  // Renamed from pool_size
+        unsigned int batch_limit;      // Added for configurable batch limit
+        unsigned int max_request_size; // Added for configurable request size
+
+        nixlGdsIOBatch* getBatchFromPool(unsigned int size);
+        void returnBatchToPool(nixlGdsIOBatch* batch);
+        nixl_status_t createAndSubmitBatch(const std::vector<GdsTransferRequestH>& requests,
+                                           size_t start_idx, size_t batch_size,
+                                           std::vector<nixlGdsIOBatch*>& batch_list);
+        nixl_status_t createBatches(const nixl_xfer_op_t &operation,
+                                   const nixl_meta_dlist_t &local,
+                                   const nixl_meta_dlist_t &remote,
+                                   nixlGdsBackendReqH* gds_handle);
 
     public:
         nixlGdsEngine(const nixlBackendInitParams* init_params);
@@ -87,66 +109,64 @@ class nixlGdsEngine : public nixlBackendEngine {
         // File operations - target is the distributed FS
         // So no requirements to connect to target.
         // Just treat it locally.
-        bool supportsNotif () const {
+        bool supportsNotif() const {
             return false;
         }
-        bool supportsRemote  () const {
+        bool supportsRemote() const {
             return false;
         }
-        bool supportsLocal   () const {
+        bool supportsLocal() const {
             return true;
         }
-        bool supportsProgTh  () const {
+        bool supportsProgTh() const {
             return false;
         }
 
-        nixl_mem_list_t getSupportedMems () const {
+        nixl_mem_list_t getSupportedMems() const {
             nixl_mem_list_t mems;
+            mems.push_back(DRAM_SEG);
             mems.push_back(VRAM_SEG);
             mems.push_back(FILE_SEG);
             return mems;
         }
 
-        nixl_status_t connect(const std::string &remote_agent)
-        {
+        nixl_status_t connect(const std::string &remote_agent) {
             return NIXL_SUCCESS;
         }
 
-        nixl_status_t disconnect(const std::string &remote_agent)
-        {
+        nixl_status_t disconnect(const std::string &remote_agent) {
             return NIXL_SUCCESS;
         }
 
-        nixl_status_t loadLocalMD (nixlBackendMD* input,
-                                   nixlBackendMD* &output) {
+        nixl_status_t loadLocalMD(nixlBackendMD* input,
+                                 nixlBackendMD* &output) {
             output = input;
-
             return NIXL_SUCCESS;
         }
 
-        nixl_status_t unloadMD (nixlBackendMD* input) {
+        nixl_status_t unloadMD(nixlBackendMD* input) {
             return NIXL_SUCCESS;
         }
         nixl_status_t registerMem(const nixlBlobDesc &mem,
-                                  const nixl_mem_t &nixl_mem,
-                                  nixlBackendMD* &out);
-        nixl_status_t deregisterMem (nixlBackendMD *meta);
+                                 const nixl_mem_t &nixl_mem,
+                                 nixlBackendMD* &out);
+        nixl_status_t deregisterMem(nixlBackendMD *meta);
 
-        nixl_status_t prepXfer (const nixl_xfer_op_t &operation,
-                                const nixl_meta_dlist_t &local,
-                                const nixl_meta_dlist_t &remote,
-                                const std::string &remote_agent,
-                                nixlBackendReqH* &handle,
-                                const nixl_opt_b_args_t* opt_args=nullptr);
+        nixl_status_t prepXfer(const nixl_xfer_op_t &operation,
+                              const nixl_meta_dlist_t &local,
+                              const nixl_meta_dlist_t &remote,
+                              const std::string &remote_agent,
+                              nixlBackendReqH* &handle,
+                              const nixl_opt_b_args_t* opt_args=nullptr);
 
-        nixl_status_t postXfer (const nixl_xfer_op_t &operation,
-                                const nixl_meta_dlist_t &local,
-                                const nixl_meta_dlist_t &remote,
-                                const std::string &remote_agent,
-                                nixlBackendReqH* &handle,
-                                const nixl_opt_b_args_t* opt_args=nullptr);
+        nixl_status_t postXfer(const nixl_xfer_op_t &operation,
+                              const nixl_meta_dlist_t &local,
+                              const nixl_meta_dlist_t &remote,
+                              const std::string &remote_agent,
+                              nixlBackendReqH* &handle,
+                              const nixl_opt_b_args_t* opt_args=nullptr);
 
-        nixl_status_t checkXfer (nixlBackendReqH* handle);
+        nixl_status_t checkXfer(nixlBackendReqH* handle);
         nixl_status_t releaseReqH(nixlBackendReqH* handle);
 };
 #endif
